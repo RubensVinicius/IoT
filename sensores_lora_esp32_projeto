@@ -1,0 +1,294 @@
+#include <lmic.h>
+#include <hal/hal.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_BMP085.h>
+#include <DHT.h>
+#include <DHT_U.h>
+#include <Adafruit_Sensor.h>
+
+#define DHTTYPE      DHT22                      // Sensor DHT22 ou AM2302
+#define DHTPIN 4                                // Pino do Arduino conectado no Sensor(Data) 
+
+//DESCOMENTAR um dos #define ABAIXO DE ACORDO COM O MICROCONTROLADOR QUE ESTÁ USANDO...
+//#define ESP8266 1
+//#define ESP32 1
+#define ESP32_HELTEC_OLED_V1 1
+//#define ARDUINO_UNO 1
+//#define ARDUINO_MEGA 1
+
+#ifdef ESP8266
+  #include <ESP8266WiFi.h> //apenas para poder desabilitar WiFi...
+   #define MOSI 13
+   #define MISO 12
+   #define SCK 14
+   #define SS 15
+   #define RST 16
+   #define DIO_0 5
+   #define DIO_1 4
+   #define DIO_2 LMIC_UNUSED_PIN
+#endif
+#ifdef ESP32
+   #include "WiFi.h" 
+   #define MOSI 23
+   #define MISO 19
+   #define SCK 18
+   #define SS 5
+   #define RST 14
+   #define DIO_0 2
+   #define DIO_1 4
+   #define DIO_2 LMIC_UNUSED_PIN
+#endif
+
+#ifdef ESP32_HELTEC_OLED_V1
+   #include "WiFi.h" 
+   #define MOSI 27
+   #define MISO 19
+   #define SCK 5
+   #define SS 18
+   #define RST 14
+   #define DIO_0 26
+   #define DIO_1 33
+   #define DIO_2 32
+#endif
+
+#ifdef ARDUINO_UNO
+   #define MOSI 11
+   #define MISO 12
+   #define SCK 13
+   #define SS 10
+   #define RST 7
+   #define DIO_0 4
+   #define DIO_1 5
+   #define DIO_2 LMIC_UNUSED_PIN
+#endif
+
+#ifdef ARDUINO_MEGA
+   #define MOSI 51
+   #define MISO 50
+   #define SCK 52
+   #define SS 53
+   #define RST 7
+   #define DIO_0 4
+   #define DIO_1 5
+   #define DIO_2 LMIC_UNUSED_PIN
+#endif
+
+#ifdef COMPILE_REGRESSION_TEST
+# define FILLMEIN 0
+#else
+# warning "You must replace the values marked FILLMEIN with real values from the TTN control panel!"
+# define FILLMEIN (#dont edit this, edit the lines that use FILLMEIN)
+#endif
+
+static const u1_t PROGMEM APPEUI[8]={  0xB1, 0xD6, 0x01, 0xD0, 0x7E, 0xD5, 0xB3, 0x70  };
+void os_getArtEui (u1_t* buf) { memcpy_P(buf, APPEUI, 8);}
+
+static const u1_t PROGMEM DEVEUI[8]={  0xBE, 0xEE, 0xE9, 0x22, 0xF4, 0x70, 0x7C, 0x00  };
+void os_getDevEui (u1_t* buf) { memcpy_P(buf, DEVEUI, 8);}
+
+static const u1_t PROGMEM APPKEY[16] = {  0xAE, 0x18, 0x5B, 0xD9, 0xF4, 0x46, 0x8F, 0x51, 0x28, 0x9F, 0xFC, 0x28, 0x28, 0xB4, 0x40, 0x4C  };
+void os_getDevKey (u1_t* buf) {  memcpy_P(buf, APPKEY, 16);}
+
+uint8_t dados[5] = {0,0,0,0,0}; //será enviado um byte, a cada transmissão, para LoraWan
+static osjob_t sendjob;
+
+const unsigned TX_INTERVAL = 60;
+
+// Pin mapping
+//os pinos lmic_pins abaixo serão identificados automaticamente pelas 
+//placas (ESP8266, ESP32, Arduino, etc...) definadas anteriormente nas macros...
+const lmic_pinmap lmic_pins = { 
+    .nss = SS,
+    .rxtx = LMIC_UNUSED_PIN,
+    .rst = RST,
+    .dio = {DIO_0, DIO_1, DIO_2},
+};
+
+DHT_Unified dht(DHTPIN, DHTTYPE);               //configurando o Sensor DHT - pino e tipo
+float sensorUmiSolo = A0;                       //porta 36
+Adafruit_BMP085 bmp;
+
+int umiAr;                                      //responsável por receber os valores de leitura do sensor de umidade do ar.
+int umiSolo;                                    //responsável por receber os valores de leitura do sensor de umidade do solo.
+int temp;                                       //responsável por receber os valores de leitura do sensor de temperatura.
+int alt;                                        //responsável por receber os valores de leitura do sensor de altitude.
+int pres;                                       //responsável por receber os valores de leitura do sensor de pressão.
+
+unsigned long tempoatual=0;                     //Variáveis declaradas para utilizar a função "millis()"
+unsigned long tempoanterior=0;                  //de maneira a demarcar o tempo entre as leituras dos sensores.
+
+void onEvent (ev_t ev) {
+    Serial.print(os_getTime());
+    Serial.print(": ");
+    switch(ev) {
+        case EV_SCAN_TIMEOUT:
+            Serial.println(F("EV_SCAN_TIMEOUT"));
+            break;
+        case EV_BEACON_FOUND:
+            Serial.println(F("EV_BEACON_FOUND"));
+            break;
+        case EV_BEACON_MISSED:
+            Serial.println(F("EV_BEACON_MISSED"));
+            break;
+        case EV_BEACON_TRACKED:
+            Serial.println(F("EV_BEACON_TRACKED"));
+            break;
+        case EV_JOINING:
+            Serial.println(F("EV_JOINING"));
+            break;
+        case EV_JOINED:
+            Serial.println(F("EV_JOINED"));
+            {
+              u4_t netid = 0;
+              devaddr_t devaddr = 0;
+              u1_t nwkKey[16];
+              u1_t artKey[16];
+              LMIC_getSessionKeys(&netid, &devaddr, nwkKey, artKey);
+              Serial.print("netid: ");
+              Serial.println(netid, DEC);
+              Serial.print("devaddr: ");
+              Serial.println(devaddr, HEX);
+              Serial.print("artKey: ");
+              for (int i=0; i<sizeof(artKey); ++i) {
+                Serial.print(artKey[i], HEX);
+              }
+              Serial.println("");
+              Serial.print("nwkKey: ");
+              for (int i=0; i<sizeof(nwkKey); ++i) {
+                Serial.print(nwkKey[i], HEX);
+              }
+              Serial.println("");
+            }
+            LMIC_setLinkCheckMode(0);
+            break;           
+        case EV_JOIN_FAILED:
+            Serial.println(F("EV_JOIN_FAILED"));
+            break;
+        case EV_REJOIN_FAILED:
+            Serial.println(F("EV_REJOIN_FAILED"));
+            break;
+        case EV_TXCOMPLETE:
+            Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+            if (LMIC.txrxFlags & TXRX_ACK)
+              Serial.println(F("Received ack"));
+            if (LMIC.dataLen) {
+              Serial.print(F("Received "));
+              Serial.print(LMIC.dataLen);
+              Serial.println(F(" bytes of payload"));
+            }
+            os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
+            break;
+        case EV_LOST_TSYNC:
+            Serial.println(F("EV_LOST_TSYNC"));
+            break;
+        case EV_RESET:
+            Serial.println(F("EV_RESET"));
+            break;
+        case EV_RXCOMPLETE:
+            Serial.println(F("EV_RXCOMPLETE"));
+            break;
+        case EV_LINK_DEAD:
+            Serial.println(F("EV_LINK_DEAD"));
+            break;
+        case EV_LINK_ALIVE:
+            Serial.println(F("EV_LINK_ALIVE"));
+            break;
+        case EV_TXSTART:
+            Serial.println(F("EV_TXSTART"));
+            break;
+        default:
+            Serial.print(F("Unknown event: "));
+            Serial.println((unsigned) ev);
+            break;
+    }
+}
+
+void do_send(osjob_t* j){
+    
+    if (LMIC.opmode & OP_TXRXPEND) {
+        Serial.println(F("OP_TXRXPEND, not sending"));
+    } else {
+
+         dados[0]=temp;
+         dados[1]=umiAr;
+         dados[2]=umiSolo;
+         dados[3]=alt-850;
+         dados[4]=pres-850;
+         LMIC_setTxData2(1, dados, sizeof(dados), 0); //enviar o valor do dado pela LoraWAN
+
+        Serial.println(F("Packet queued"));
+    }
+}
+
+void setup() {
+    #ifdef ESP8266
+        WiFi.mode(WIFI_OFF);  //desabilitar o WiFi do ESP8266 - caso não for usar para ter economia de energia...
+    #endif
+    #if defined(ESP32) || defined(ESP32_HELTEC_OLED_V1)
+        btStop(); //desabilita BlueTooth - caso não for usar para ter economia de energia...
+        WiFi.mode(WIFI_OFF); //desabilita WiFi - caso não for usar para ter economia de energia...
+    #endif
+        Serial.begin(115200);
+        Serial.println(F("Starting"));
+    
+    #ifdef VCC_ENABLE
+        pinMode(VCC_ENABLE, OUTPUT);
+        digitalWrite(VCC_ENABLE, HIGH);
+        delay(1000);
+        #endif
+    os_init();
+    LMIC_reset();
+    LMIC_setClockError(MAX_CLOCK_ERROR * 1 / 100);
+    LMIC_selectSubBand(1);
+    do_send(&sendjob);
+    // inicializa os sensores.
+    bmp.begin();
+    dht.begin();                                  
+    Serial.println("Inicializando sensores");
+    sensor_t sensor;
+}
+
+void loop() {
+    
+  os_runloop_once();
+  tempoatual = millis();
+  if (tempoatual - tempoanterior >= 2000) {
+
+    tempoanterior = tempoatual;
+
+  
+    umiSolo = analogRead(sensorUmiSolo);
+    umiSolo = map(umiSolo,4095,2500,0,100);   //reverte os valores da função.
+    sensors_event_t event;                    // inicializa o evento da Temperatura.
+    
+    dht.temperature().getEvent(&event);       // faz a leitura da Temperatura.
+    temp = event.temperature;
+    Serial.print("Temperatura: ");            // imprime a Temperatura.
+    Serial.print(temp);
+    Serial.println(" *C");
+  
+    dht.humidity().getEvent(&event);          // faz a leitura de umidade do ar.
+    umiAr = event.relative_humidity;
+    Serial.print("Umidade do ar: ");          // imprime a Umidade do ar.
+    Serial.print(umiAr);
+    Serial.println("%");
+  
+    
+    Serial.print("Umidade do solo : ");       //faz a leitura da umidade do solo.
+    Serial.print(umiSolo);                    //imprime a umidade do solo.
+    Serial.print("%\n");
+  
+    pres = bmp.readPressure();                //faz a leitura da pressão.
+    Serial.print("Pressão = ");               //imprime a pressao transdormando-a de Pascal para Hectopascal.
+    Serial.print(pres*0.01);
+    Serial.println(" hPa");
+  
+    alt = bmp.readAltitude(103500);           //faz a leitura da altitude.
+    Serial.print("Altitude = ");              //imprime a altitude.
+    Serial.print(alt);
+    Serial.println(" metros");
+  
+    Serial.print("\n\n");
+  }
+}
