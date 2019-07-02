@@ -214,7 +214,7 @@ void do_send(osjob_t* j){
          dados[1]=umiAr;
          dados[2]=umiSolo;
          dados[3]=alt-850;
-         dados[4]=pres-850;
+         dados[4]=(pres*0.01)-850;
          LMIC_setTxData2(1, dados, sizeof(dados), 0); //enviar o valor do dado pela LoraWAN
 
         Serial.println(F("Packet queued"));
